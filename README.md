@@ -32,6 +32,7 @@ python scaffold.py
 - [x] **20.** HybridStack
 - [x] **21.** store_kv_entry
 - [x] **22.** LayerCache
+- [x] **23.** cached_attention
 
 ---
 

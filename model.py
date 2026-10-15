@@ -1101,3 +1101,86 @@ class LayerCache:
         # 4. Advance the token position.
         self.length += 1
 
+# Step 23 - cached_attention
+def cached_attention(cache, h, pos):
+    # h: (B, d_model), the current token's hidden state.
+    layer = cache.layer
+    B = h.shape[0]
+    device = h.device
+
+    Hq = h[:, None, :]  # (B, 1, d_model)
+    q_pos = torch.tensor([pos], device=device, dtype=torch.long)
+
+    # Retrieve cached compressed entries.
+    if cache.comp is None:
+        comp = h.new_empty((B, 0, layer.head_dim))
+    else:
+        comp = cache.comp
+
+    nb_real = comp.shape[1]
+
+    if cache.kind == "csa":
+        # Keep the candidate count stable when fewer than top_k
+        # compressed entries are available. Padded entries are invalid.
+        target_nb = max(nb_real, layer.top_k)
+
+        if nb_real < target_nb:
+            padding = h.new_zeros(
+                (B, target_nb - nb_real, layer.head_dim)
+            )
+            comp = torch.cat((comp, padding), dim=1)
+
+        # Mark actual cached entries visible, and padding invisible.
+        visible = (
+            torch.arange(target_nb, device=device) < nb_real
+        ).unsqueeze(0)
+
+        # Retrieve compressed indexer keys.
+        if cache.kidx is None:
+            idx_dim = layer.idx_comp.kv_a.out_features
+            kidx = h.new_empty((B, 0, idx_dim))
+        else:
+            kidx = cache.kidx
+
+        # Pad indexer keys to match the compressed candidate axis.
+        if nb_real < target_nb:
+            idx_padding = h.new_zeros(
+                (B, target_nb - nb_real, kidx.shape[-1])
+            )
+            kidx = torch.cat((kidx, idx_padding), dim=1)
+
+    elif cache.kind == "hca":
+        # HCA uses all compressed entries directly.
+        visible = torch.ones(
+            (1, nb_real), dtype=torch.bool, device=device
+        )
+
+    else:
+        raise ValueError("cache.kind must be 'csa' or 'hca'")
+
+    # Retrieve the local sliding-window entries.
+    win = cache.window[:, None, :, :]  # (B, 1, w, head_dim)
+    w = cache.window.shape[1]
+
+    win_valid = torch.ones(
+        (1, w), dtype=torch.bool, device=device
+    )
+    win_pos = torch.tensor(
+        cache.win_pos, device=device, dtype=torch.long
+    ).unsqueeze(0)
+
+    # Run the corresponding attention core.
+    if cache.kind == "csa":
+        out = csa_core(
+            layer, Hq, q_pos, comp, kidx,
+            visible, win, win_valid, win_pos
+        )
+    else:
+        out = hca_core(
+            layer, Hq, q_pos, comp,
+            visible, win, win_valid, win_pos
+        )
+
+    # Remove the single-token sequence dimension.
+    return out[:, 0, :]
+
