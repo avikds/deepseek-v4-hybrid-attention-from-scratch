@@ -314,3 +314,45 @@ def core_attention(q, cands, valid, sink):
 
     return out, probs
 
+# Step 11 - window_entries
+def window_entries(x, n_win):
+    # Validate the sliding-window size.
+    if not isinstance(n_win, int) or isinstance(n_win, bool) or n_win <= 0:
+        raise ValueError("n_win must be a positive integer")
+
+    B, n, c = x.shape
+
+    # Compute the token positions for each sliding window.
+    # positions[t, j] = t - n_win + 1 + j
+    # Shape: (n, n_win)
+    positions = (
+        torch.arange(n, device=x.device).unsqueeze(1)
+        - n_win + 1
+        + torch.arange(n_win, device=x.device).unsqueeze(0)
+    )
+
+    # An entry is valid if its position is within the sequence.
+    # Shape: (n, n_win)
+    valid = positions >= 0
+
+    # Handle an empty input sequence.
+    if n == 0:
+        win = x.new_zeros((B, 0, n_win, c))
+        return win, valid, positions
+
+    # Replace negative positions with zero temporarily so that
+    # indexing is safe. Invalid entries will be zeroed afterward.
+    safe_positions = positions.clamp_min(0)
+
+    # Gather the uncompressed KV entries for every sliding window.
+    # Shape: (B, n, n_win, c)
+    win = x[:, safe_positions, :]
+
+    # Zero-pad entries that lie before the beginning of the sequence.
+    win = win.masked_fill(
+        ~valid.unsqueeze(0).unsqueeze(-1),
+        0.0
+    )
+
+    return win, valid, positions
+

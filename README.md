@@ -20,6 +20,7 @@ python scaffold.py
 - [x] **8.** causal_block_mask
 - [x] **9.** select_topk
 - [x] **10.** core_attention
+- [x] **11.** window_entries
 
 ---
 
