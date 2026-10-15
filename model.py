@@ -662,3 +662,24 @@ class CSALayer(nn.Module):
             win_pos
         )
 
+# Step 16 - hca_compress
+def hca_compress(C, Z, bias, m):
+    # Split the KV entries and compression logits into non-overlapping
+    # blocks of m tokens. Incomplete trailing tokens are discarded.
+    C_blocks, _ = split_blocks(C, m)
+    Z_blocks, _ = split_blocks(Z, m)
+
+    # Add the learnable positional bias to every block.
+    # Shapes: (B, nb, m, c) + (m, c)
+    logits = Z_blocks + bias
+
+    # Normalize compression weights over the m positions
+    # independently for each channel and block.
+    weights = torch.softmax(logits, dim=2)
+
+    # Compute the weighted sum of KV entries within each block.
+    # Output shape: (B, n // m, c)
+    compressed = (weights * C_blocks).sum(dim=2)
+
+    return compressed
+

@@ -25,6 +25,7 @@ python scaffold.py
 - [x] **13.** GroupedOutputProjection
 - [x] **14.** rope_core_attention
 - [x] **15.** CSALayer
+- [x] **16.** hca_compress
 
 ---
 
