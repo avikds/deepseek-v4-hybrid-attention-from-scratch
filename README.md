@@ -11,6 +11,7 @@ python scaffold.py
 ## Steps
 
 - [x] **1.** split_blocks
+- [x] **2.** overlap_windows
 
 ---
 
