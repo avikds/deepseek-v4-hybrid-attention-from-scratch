@@ -415,3 +415,50 @@ def apply_partial_rope(x, positions, rope_dim, base=10000.0):
 
     return torch.cat((unchanged, rotated), dim=-1)
 
+# Step 13 - GroupedOutputProjection
+class GroupedOutputProjection(nn.Module):
+    def __init__(self, n_heads, head_dim, groups, d_group, d_model):
+        super().__init__()
+
+        if groups <= 0 or n_heads % groups != 0:
+            raise ValueError("groups must be positive and divide n_heads")
+
+        # Store the number of groups and dimensions for each group.
+        self.groups = groups
+        self.group_in_dim = (n_heads * head_dim) // groups
+
+        # Learnable projection for each group.
+        # Shape: (groups, n_heads * head_dim // groups, d_group)
+        self.group_weight = nn.Parameter(
+            torch.randn(groups, self.group_in_dim, d_group)
+            / math.sqrt(self.group_in_dim)
+        )
+
+        # Final bias-free projection back to the model dimension.
+        self.final = nn.Linear(groups * d_group, d_model, bias=False)
+
+    def forward(self, o):
+        # o: (B, n, n_heads, head_dim)
+        B, n, n_heads, head_dim = o.shape
+
+        # Divide consecutive heads into groups and concatenate the
+        # heads within each group into a single feature vector.
+        # Shape: (B, n, groups, group_in_dim)
+        grouped = o.reshape(B, n, self.groups, self.group_in_dim)
+
+        # Apply the corresponding learnable projection to each group.
+        # Shape: (B, n, groups, d_group)
+        projected = torch.einsum(
+            "bngd,gdo->bngo",
+            grouped,
+            self.group_weight
+        )
+
+        # Concatenate the projected groups.
+        # Shape: (B, n, groups * d_group)
+        concatenated = projected.reshape(B, n, self.groups * self.group_weight.shape[-1])
+
+        # Project to the model dimension.
+        # Shape: (B, n, d_model)
+        return self.final(concatenated)
+

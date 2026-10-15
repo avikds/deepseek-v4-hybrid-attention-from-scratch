@@ -22,6 +22,7 @@ python scaffold.py
 - [x] **10.** core_attention
 - [x] **11.** window_entries
 - [x] **12.** apply_partial_rope
+- [x] **13.** GroupedOutputProjection
 
 ---
 
