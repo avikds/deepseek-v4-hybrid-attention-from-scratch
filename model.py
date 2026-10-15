@@ -507,3 +507,158 @@ def rope_core_attention(q, q_pos, cands, valid, cand_pos, sink, rope_dim):
     # Shape: (B, n, n_heads, c)
     return out
 
+# Step 15 - CSALayer
+def csa_core(layer, Hq, q_pos, comp, kidx, visible, win, win_valid, win_pos):
+    # Hq: (B, nq, d_model)
+    # comp: (B, nb, head_dim)
+    # kidx: (B, nb, idx_dim)
+    # win: (B, nq, n_win, head_dim)
+
+    B, nq, _ = Hq.shape
+
+    # Generate attention queries and indexer queries from the shared latent.
+    q, q_idx = layer.queries(Hq)
+
+    # Normalize attention queries per head.
+    q = layer.q_norm(q)
+
+    # Compute weighted multi-head ReLU index scores.
+    # idx_weight(Hq) produces per-token weights for indexer heads.
+    w_idx = layer.idx_weight(Hq)
+    scores = index_scores(q_idx, w_idx, kidx)
+
+    # Ensure the visibility mask is on the correct device.
+    visible = visible.to(device=scores.device, dtype=torch.bool)
+
+    # Select the top-k visible compressed entries for every query.
+    idx, idx_valid = select_topk(scores, visible, layer.top_k)
+    k_eff = idx.shape[-1]
+
+    # Gather the selected compressed KV entries.
+    # Expand comp across queries, then gather along the block axis.
+    head_dim = comp.shape[-1]
+    nb = comp.shape[1]
+
+    expanded_comp = comp.unsqueeze(1).expand(B, nq, nb, head_dim)
+    gather_idx = idx.unsqueeze(-1).expand(B, nq, k_eff, head_dim)
+    selected_comp = torch.gather(expanded_comp, dim=2, index=gather_idx)
+
+    # A compressed entry represents the final token of its block.
+    # Invalid selections are ignored by idx_valid.
+    selected_pos = layer.m * (idx + 1) - 1
+
+    # Move window tensors to the query device.
+    win = win.to(device=q.device)
+    win_valid = win_valid.to(device=q.device, dtype=torch.bool)
+    win_pos = win_pos.to(device=q.device, dtype=torch.long)
+    idx_valid = idx_valid.to(device=q.device)
+
+    # Expand window validity and positions across the batch dimension.
+    win_valid_b = win_valid.unsqueeze(0).expand(B, -1, -1)
+    win_pos_b = win_pos.unsqueeze(0).expand(B, -1, -1)
+
+    # Combine selected compressed entries with uncompressed local entries.
+    # Candidate ordering: selected compressed entries, then sliding window.
+    cands = torch.cat((selected_comp, win), dim=2)
+
+    # Combine validity masks and absolute candidate positions.
+    valid = torch.cat((idx_valid, win_valid_b), dim=2)
+    cand_pos = torch.cat((selected_pos, win_pos_b), dim=2)
+
+    # Apply partial RoPE, run sink-aware attention, and counter-rotate
+    # the resulting head outputs using the query positions.
+    out = rope_core_attention(
+        q,
+        q_pos,
+        cands,
+        valid,
+        cand_pos,
+        layer.sink,
+        layer.rope_dim
+    )
+
+    # Project grouped head outputs back to the model dimension.
+    return layer.out_proj(out)
+
+
+class CSALayer(nn.Module):
+    def __init__(
+        self, d_model, head_dim, n_heads, d_c, idx_dim,
+        n_idx_heads, m, n_win, top_k, rope_dim, groups, d_group
+    ):
+        super().__init__()
+
+        # Store the configuration required by CSA and the shared helper.
+        self.m = m
+        self.n_win = n_win
+        self.top_k = top_k
+        self.rope_dim = rope_dim
+        self.head_dim = head_dim
+
+        # Compress hidden states into KV entries and indexer keys.
+        self.kv_comp = TokenCompressor(d_model, head_dim, m)
+        self.idx_comp = TokenCompressor(d_model, idx_dim, m)
+
+        # Generate attention and indexer queries from one shared latent.
+        self.queries = LatentQueries(
+            d_model, d_c, n_heads, head_dim, n_idx_heads, idx_dim
+        )
+
+        # Generate per-token weights for the indexer heads.
+        self.idx_weight = nn.Linear(
+            d_model, n_idx_heads, bias=False
+        )
+
+        # Project hidden states into uncompressed local KV entries.
+        self.win_kv = nn.Linear(
+            d_model, head_dim, bias=False
+        )
+
+        # Per-head RMSNorm for queries and KV entries.
+        self.q_norm = HeadRMSNorm(head_dim)
+        self.kv_norm = HeadRMSNorm(head_dim)
+
+        # Learnable attention-sink logit for every attention head.
+        self.sink = nn.Parameter(torch.zeros(n_heads))
+
+        # Grouped projection of the concatenated attention-head outputs.
+        self.out_proj = GroupedOutputProjection(
+            n_heads, head_dim, groups, d_group, d_model
+        )
+
+    def forward(self, H):
+        # H: (B, n, d_model)
+        B, n, _ = H.shape
+
+        # Build compressed KV entries and normalize them per head.
+        comp = self.kv_norm(self.kv_comp(H))
+
+        # Build compressed indexer keys.
+        kidx = self.idx_comp(H)
+
+        # Build the local sliding window from normalized KV entries.
+        local_kv = self.kv_norm(self.win_kv(H))
+        win, win_valid, win_pos = window_entries(
+            local_kv, self.n_win
+        )
+
+        # Allow queries to attend only to fully preceding compressed blocks.
+        nb = comp.shape[1]
+        visible = causal_block_mask(n, nb, self.m).to(device=H.device)
+
+        # Absolute position of each query token.
+        q_pos = torch.arange(n, device=H.device)
+
+        # Run compressed sparse attention and return model-width outputs.
+        return csa_core(
+            self,
+            H,
+            q_pos,
+            comp,
+            kidx,
+            visible,
+            win,
+            win_valid,
+            win_pos
+        )
+
