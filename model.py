@@ -683,3 +683,166 @@ def hca_compress(C, Z, bias, m):
 
     return compressed
 
+# Step 17 - HCALayer
+def hca_core(layer, Hq, q_pos, comp, visible, win, win_valid, win_pos):
+    # Hq:       (B, nq, d_model)
+    # comp:     (B, nb, head_dim)
+    # visible:  (nq, nb)
+    # win:      (B, nq, n_win, head_dim)
+
+    B, nq, _ = Hq.shape
+    nb = comp.shape[1]
+
+    # Generate queries using the low-rank projection and reshape
+    # them into independent attention heads.
+    q = layer.q_down(Hq)
+    q = layer.q_up(q)
+    q = q.reshape(B, nq, layer.n_heads, layer.head_dim)
+
+    # Apply per-head RMSNorm.
+    q = layer.q_norm(q)
+
+    # Every compressed entry is a candidate for every query.
+    # Expand compressed entries along the query-token dimension.
+    compressed_cands = comp.unsqueeze(1).expand(
+        B, nq, nb, layer.head_dim
+    )
+
+    # A compressed entry represents the last token of its block.
+    # Position of compressed entry s: m * (s + 1) - 1.
+    compressed_positions = (
+        layer.m
+        * (torch.arange(nb, device=comp.device) + 1)
+        - 1
+    )
+    compressed_positions = compressed_positions.view(1, 1, nb).expand(
+        B, nq, nb
+    )
+
+    # Expand the causal visibility mask across the batch.
+    compressed_valid = visible.to(
+        device=comp.device, dtype=torch.bool
+    ).unsqueeze(0).expand(B, -1, -1)
+
+    # Ensure window metadata uses the same device and appropriate dtypes.
+    win = win.to(device=comp.device)
+    win_valid = win_valid.to(device=comp.device, dtype=torch.bool)
+    win_pos = win_pos.to(device=comp.device, dtype=torch.long)
+
+    # Expand window validity and positions across the batch.
+    window_valid = win_valid.unsqueeze(0).expand(B, -1, -1)
+    window_positions = win_pos.unsqueeze(0).expand(B, -1, -1)
+
+    # Combine dense compressed candidates with uncompressed local entries.
+    # Candidate order: all compressed entries, then sliding-window entries.
+    cands = torch.cat((compressed_cands, win), dim=2)
+    valid = torch.cat((compressed_valid, window_valid), dim=2)
+    cand_pos = torch.cat(
+        (compressed_positions, window_positions), dim=2
+    )
+
+    # Apply partial RoPE, shared KV attention, attention sinks,
+    # and the position-minus-i counter-rotation.
+    out = rope_core_attention(
+        q,
+        q_pos,
+        cands,
+        valid,
+        cand_pos,
+        layer.sink,
+        layer.rope_dim
+    )
+
+    # Project the concatenated head outputs back to model width.
+    return layer.out_proj(out)
+
+
+class HCALayer(nn.Module):
+    def __init__(
+        self, d_model, head_dim, n_heads, d_c, m,
+        n_win, rope_dim, groups, d_group
+    ):
+        super().__init__()
+
+        # Store the HCA configuration.
+        self.m = m
+        self.n_win = n_win
+        self.rope_dim = rope_dim
+        self.head_dim = head_dim
+        self.n_heads = n_heads
+
+        # Projections for KV entries and compression logits.
+        self.kv_proj = nn.Linear(
+            d_model, head_dim, bias=False
+        )
+        self.z_proj = nn.Linear(
+            d_model, head_dim, bias=False
+        )
+
+        # Learnable positional bias for each within-block position.
+        self.bias = nn.Parameter(torch.zeros(m, head_dim))
+
+        # Low-rank query projection.
+        self.q_down = nn.Linear(
+            d_model, d_c, bias=False
+        )
+        self.q_up = nn.Linear(
+            d_c, n_heads * head_dim, bias=False
+        )
+
+        # Projection for uncompressed sliding-window KV entries.
+        self.win_kv = nn.Linear(
+            d_model, head_dim, bias=False
+        )
+
+        # Per-head normalization for queries and compressed KV entries.
+        self.q_norm = HeadRMSNorm(head_dim)
+        self.kv_norm = HeadRMSNorm(head_dim)
+
+        # Learnable attention-sink logit for each attention head.
+        self.sink = nn.Parameter(torch.zeros(n_heads))
+
+        # Grouped output projection.
+        self.out_proj = GroupedOutputProjection(
+            n_heads, head_dim, groups, d_group, d_model
+        )
+
+    def forward(self, H):
+        # H: (B, n, d_model)
+        B, n, _ = H.shape
+
+        # Project and compress KV entries using non-overlapping blocks.
+        C = self.kv_proj(H)
+        Z = self.z_proj(H)
+        comp = hca_compress(C, Z, self.bias, self.m)
+
+        # Normalize the compressed entries.
+        comp = self.kv_norm(comp)
+
+        # Construct the uncompressed local sliding window.
+        local_kv = self.kv_norm(self.win_kv(H))
+        win, win_valid, win_pos = window_entries(
+            local_kv, self.n_win
+        )
+
+        # Determine which compressed blocks are fully preceding each query.
+        nb = comp.shape[1]
+        visible = causal_block_mask(n, nb, self.m).to(
+            device=H.device
+        )
+
+        # Absolute position of each query token.
+        q_pos = torch.arange(n, device=H.device)
+
+        # Run Heavily Compressed Attention.
+        return hca_core(
+            self,
+            H,
+            q_pos,
+            comp,
+            visible,
+            win,
+            win_valid,
+            win_pos
+        )
+
