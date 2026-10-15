@@ -846,3 +846,14 @@ class HCALayer(nn.Module):
             win_pos
         )
 
+# Step 18 - layer_kinds
+def layer_kinds(n_layers, hca_every):
+    # Every hca_every-th layer is HCA; all other layers are CSA.
+    if not isinstance(hca_every, int) or isinstance(hca_every, bool) or hca_every <= 0:
+        raise ValueError("hca_every must be a positive integer")
+
+    return [
+        "hca" if (i + 1) % hca_every == 0 else "csa"
+        for i in range(n_layers)
+    ]
+

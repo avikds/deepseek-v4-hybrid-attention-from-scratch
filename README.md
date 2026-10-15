@@ -27,6 +27,7 @@ python scaffold.py
 - [x] **15.** CSALayer
 - [x] **16.** hca_compress
 - [x] **17.** HCALayer
+- [x] **18.** layer_kinds
 
 ---
 
