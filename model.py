@@ -161,3 +161,39 @@ class HeadRMSNorm(nn.Module):
         # Apply the learnable gain, preserving the input shape.
         return x_norm * self.weight
 
+# Step 6 - LatentQueries
+class LatentQueries(nn.Module):
+    def __init__(self, d_model, d_c, n_heads, head_dim, n_idx_heads, idx_dim):
+        super().__init__()
+
+        # Store the attention and indexer dimensions.
+        self.n_heads = n_heads
+        self.head_dim = head_dim
+        self.n_idx_heads = n_idx_heads
+        self.idx_dim = idx_dim
+
+        # Project hidden states into a shared compressed latent.
+        self.down = nn.Linear(d_model, d_c, bias=False)
+
+        # Generate attention queries from the shared latent.
+        self.up = nn.Linear(d_c, n_heads * head_dim, bias=False)
+
+        # Generate indexer queries from the same shared latent.
+        self.up_idx = nn.Linear(d_c, n_idx_heads * idx_dim, bias=False)
+
+    def forward(self, H):
+        # H: (B, n, d_model)
+        # Compress hidden states into the shared latent.
+        latent = self.down(H)  # (B, n, d_c)
+
+        # Project and reshape attention queries.
+        q = self.up(latent)
+        B, n, _ = q.shape
+        q = q.reshape(B, n, self.n_heads, self.head_dim)
+
+        # Project and reshape indexer queries using the same latent.
+        q_idx = self.up_idx(latent)
+        q_idx = q_idx.reshape(B, n, self.n_idx_heads, self.idx_dim)
+
+        return q, q_idx
+
