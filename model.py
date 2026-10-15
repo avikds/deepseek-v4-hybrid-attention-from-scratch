@@ -926,3 +926,38 @@ class HybridStack(nn.Module):
         # Output: (B, n, vocab_size)
         return logits
 
+# Step 21 - store_kv_entry
+def store_kv_entry(kv, rope_dim):
+    # Validate the rotary dimension.
+    if not isinstance(rope_dim, int) or isinstance(rope_dim, bool):
+        raise ValueError("rope_dim must be an integer")
+    if rope_dim < 0 or rope_dim > kv.shape[-1]:
+        raise ValueError("rope_dim must be between 0 and the last dimension")
+
+    # Store the non-rotary body in FP8 and the rotary portion in BF16.
+    split_dim = kv.shape[-1] - rope_dim
+
+    body = kv[..., :split_dim].to(dtype=torch.float8_e4m3fn)
+    rope = kv[..., split_dim:].to(dtype=torch.bfloat16)
+
+    return {
+        "rope": rope,
+        "body": body
+    }
+
+
+def load_kv_entry(stored):
+    # Restore both parts to float32 and concatenate in their original order.
+    body = stored["body"].to(dtype=torch.float32)
+    rope = stored["rope"].to(dtype=torch.float32)
+
+    return torch.cat((body, rope), dim=-1)
+
+
+def entry_bytes(stored):
+    # Compute actual storage in bytes for both tensors.
+    body_bytes = stored["body"].numel() * stored["body"].element_size()
+    rope_bytes = stored["rope"].numel() * stored["rope"].element_size()
+
+    return body_bytes + rope_bytes
+
