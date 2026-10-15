@@ -31,6 +31,7 @@ python scaffold.py
 - [x] **19.** HybridBlock
 - [x] **20.** HybridStack
 - [x] **21.** store_kv_entry
+- [x] **22.** LayerCache
 
 ---
 

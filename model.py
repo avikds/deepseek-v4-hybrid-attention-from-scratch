@@ -961,3 +961,143 @@ def entry_bytes(stored):
 
     return body_bytes + rope_bytes
 
+# Step 22 - LayerCache
+class LayerCache:
+    def __init__(self, layer, kind, quantize=False):
+        self.layer = layer
+        self.kind = kind
+        self.quantize = quantize
+
+        # Compressed KV entries and (for CSA) compressed indexer keys.
+        self.comp = None
+        self.kidx = None
+
+        # Hidden states waiting to form a complete compression block.
+        self.tail = None
+
+        # Previous block's hidden states, required for CSA overlap.
+        self.prev = None
+
+        # Uncompressed KV entries for the sliding window.
+        self.window = None
+        self.win_pos = []
+
+        # Number of tokens processed so far.
+        self.length = 0
+
+    def _quantize_entry(self, entry):
+        # Simulate mixed BF16/FP8 storage and restore to float32.
+        if self.quantize:
+            return load_kv_entry(
+                store_kv_entry(entry, self.layer.rope_dim)
+            )
+        return entry
+
+    def append(self, h):
+        # h: (B, d_model), the normalized hidden state of the next token.
+        layer = self.layer
+        m = layer.m
+
+        # 1. Compress the pending block before accepting the next token.
+        if self.tail is not None and self.tail.shape[1] >= m:
+            if self.kind == "csa":
+                # Include the preceding block to construct the overlapping
+                # CSA window. For the first block, no preceding block exists.
+                if self.prev is None:
+                    block_input = self.tail
+                else:
+                    block_input = torch.cat(
+                        (self.prev, self.tail), dim=1
+                    )
+
+                # Retain the final compressed entry for the current block.
+                entry = layer.kv_comp(block_input)[:, -1:, :]
+                entry = layer.kv_norm(entry)
+
+                # Indexer keys are compressed separately and are not KV-
+                # quantized; their dimension may differ from head_dim.
+                idx_entry = layer.idx_comp(block_input)[:, -1:, :]
+
+                # Preserve the current block as the preceding block for
+                # the next CSA compression operation.
+                self.prev = self.tail
+
+                # Append the compressed KV entry.
+                entry = self._quantize_entry(entry)
+                if self.comp is None:
+                    self.comp = entry
+                else:
+                    self.comp = torch.cat(
+                        (self.comp, entry), dim=1
+                    )
+
+                # Append the corresponding compressed indexer key.
+                if self.kidx is None:
+                    self.kidx = idx_entry
+                else:
+                    self.kidx = torch.cat(
+                        (self.kidx, idx_entry), dim=1
+                    )
+
+            elif self.kind == "hca":
+                # HCA compresses a non-overlapping block.
+                C = layer.kv_proj(self.tail)
+                Z = layer.z_proj(self.tail)
+
+                entry = hca_compress(
+                    C, Z, layer.bias, m
+                )
+                entry = layer.kv_norm(entry)
+                entry = self._quantize_entry(entry)
+
+                if self.comp is None:
+                    self.comp = entry
+                else:
+                    self.comp = torch.cat(
+                        (self.comp, entry), dim=1
+                    )
+
+            else:
+                raise ValueError(
+                    "kind must be 'csa' or 'hca'"
+                )
+
+            # The completed block has been compressed.
+            self.tail = None
+
+        # 2. Append the new hidden state to the pending block.
+        new_token = h.unsqueeze(1)
+
+        if self.tail is None:
+            self.tail = new_token
+        else:
+            self.tail = torch.cat(
+                (self.tail, new_token), dim=1
+            )
+
+        # 3. Append this token's uncompressed sliding-window KV entry.
+        window_entry = layer.kv_norm(layer.win_kv(h))
+        window_entry = window_entry.unsqueeze(1)
+        window_entry = self._quantize_entry(window_entry)
+
+        if self.window is None:
+            self.window = window_entry
+        else:
+            self.window = torch.cat(
+                (self.window, window_entry), dim=1
+            )
+
+        # Record the absolute position of the new window entry.
+        self.win_pos.append(self.length)
+
+        # Keep only the most recent n_win entries.
+        n_win = layer.n_win
+        if len(self.win_pos) > n_win:
+            self.win_pos = self.win_pos[-n_win:]
+
+        if self.window.shape[1] > n_win:
+            self.window = self.window[:, -n_win:, :]
+
+        # 4. Advance the token position.
+        self.length += 1
+
