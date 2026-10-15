@@ -34,6 +34,7 @@ python scaffold.py
 - [x] **22.** LayerCache
 - [x] **23.** cached_attention
 - [x] **24.** decode_step
+- [x] **25.** attention_cost_report
 
 ---
 

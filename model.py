@@ -1244,3 +1244,110 @@ def prefill(stack, tokens, quantize=False):
 
     return logits, caches
 
+# Step 25 - attention_cost_report
+def attention_cost_report(cfg, n_tokens):
+    # Read the hybrid attention configuration.
+    head_dim = cfg["head_dim"]
+    idx_dim = cfg["idx_dim"]
+    n_heads = cfg["n_heads"]
+    n_idx_heads = cfg["n_idx_heads"]
+    m = cfg["m"]
+    m_prime = cfg["m_prime"]
+    n_win = cfg["n_win"]
+    top_k = cfg["top_k"]
+    rope_dim = cfg["rope_dim"]
+    csa_layers = cfg["csa_layers"]
+    hca_layers = cfg["hca_layers"]
+
+    # Number of compressed entries at each compression rate.
+    nb = n_tokens // m
+    nb_prime = n_tokens // m_prime
+
+    # Bytes per KV entry:
+    # rotary dimensions use BF16 (2 bytes each);
+    # remaining dimensions use FP8 (1 byte each).
+    entry = 2 * rope_dim + (head_dim - rope_dim)
+
+    # ---------------------------------------------------------
+    # Hybrid KV-cache memory
+    # ---------------------------------------------------------
+
+    # CSA stores compressed KV entries, FP8 indexer keys,
+    # and the recent uncompressed sliding-window entries.
+    csa_bytes_per_layer = (
+        nb * (entry + idx_dim)
+        + n_win * entry
+    )
+
+    # HCA stores densely attended compressed KV entries
+    # and the recent sliding-window entries.
+    hca_bytes_per_layer = (
+        nb_prime * entry
+        + n_win * entry
+    )
+
+    hybrid_bytes = (
+        csa_layers * csa_bytes_per_layer
+        + hca_layers * hca_bytes_per_layer
+    )
+
+    # ---------------------------------------------------------
+    # BF16 GQA8 baseline KV-cache memory
+    # ---------------------------------------------------------
+
+    # Eight KV heads, head dimension 128, and two tensors
+    # (keys and values), each using BF16.
+    baseline_bytes_per_layer = n_tokens * 2 * 8 * 128 * 2
+
+    total_layers = csa_layers + hca_layers
+    baseline_bytes = total_layers * baseline_bytes_per_layer
+
+    # ---------------------------------------------------------
+    # Hybrid attention FLOPs per query token
+    # ---------------------------------------------------------
+
+    # CSA: lightning indexer scoring plus sparse attention
+    # over selected compressed entries and the local window.
+    csa_flops_per_layer = (
+        2 * n_idx_heads * idx_dim * nb
+        + 4 * n_heads * head_dim * (min(top_k, nb) + n_win)
+    )
+
+    # HCA: dense attention over all compressed entries
+    # plus the local sliding window.
+    hca_flops_per_layer = (
+        4 * n_heads * head_dim * (nb_prime + n_win)
+    )
+
+    hybrid_flops = (
+        csa_layers * csa_flops_per_layer
+        + hca_layers * hca_flops_per_layer
+    )
+
+    # ---------------------------------------------------------
+    # Baseline attention FLOPs per query token
+    # ---------------------------------------------------------
+
+    baseline_flops_per_layer = (
+        4 * n_heads * 128 * n_tokens
+    )
+
+    baseline_flops = total_layers * baseline_flops_per_layer
+
+    # Ratios compare hybrid costs against the baseline.
+    bytes_ratio = (
+        hybrid_bytes / baseline_bytes if baseline_bytes else 0.0
+    )
+    flops_ratio = (
+        hybrid_flops / baseline_flops if baseline_flops else 0.0
+    )
+
+    return {
+        "baseline_bytes": baseline_bytes,
+        "hybrid_bytes": hybrid_bytes,
+        "bytes_ratio": bytes_ratio,
+        "baseline_flops": baseline_flops,
+        "hybrid_flops": hybrid_flops,
+        "flops_ratio": flops_ratio,
+    }
+
