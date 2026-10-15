@@ -99,3 +99,44 @@ def compress_blocks(Ca, Cb, Za, Zb, Ba, Bb, m):
 
     return compressed
 
+# Step 4 - TokenCompressor
+import torch.nn as nn
+
+class TokenCompressor(nn.Module):
+    def __init__(self, d_model, c, m):
+        super().__init__()
+
+        # Store the compression block size.
+        self.m = m
+
+        # Project hidden states into the two KV-entry series
+        # and their corresponding compression-logit series.
+        self.kv_a = nn.Linear(d_model, c, bias=False)
+        self.kv_b = nn.Linear(d_model, c, bias=False)
+        self.z_a = nn.Linear(d_model, c, bias=False)
+        self.z_b = nn.Linear(d_model, c, bias=False)
+
+        # Learnable positional biases for the two token series.
+        # Initialize both biases to zero.
+        self.bias_a = nn.Parameter(torch.zeros(m, c))
+        self.bias_b = nn.Parameter(torch.zeros(m, c))
+
+    def forward(self, H):
+        # Project hidden states into KV entries and compression logits.
+        Ca = self.kv_a(H)
+        Cb = self.kv_b(H)
+        Za = self.z_a(H)
+        Zb = self.z_b(H)
+
+        # Compress each complete block using overlapping softmax
+        # weights and learnable positional biases.
+        compressed = compress_blocks(
+            Ca, Cb, Za, Zb,
+            self.bias_a, self.bias_b,
+            self.m
+        )
+
+        # Shape: (B, n // m, c). Incomplete trailing tokens
+        # do not produce a compressed entry.
+        return compressed
+
