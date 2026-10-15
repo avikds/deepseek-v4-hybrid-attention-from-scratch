@@ -216,3 +216,24 @@ def index_scores(q_idx, w_idx, k_idx):
 
     return scores
 
+# Step 8 - causal_block_mask
+def causal_block_mask(n, nb, m):
+    # Validate the block size.
+    if not isinstance(m, int) or isinstance(m, bool) or m <= 0:
+        raise ValueError("m must be a positive integer")
+
+    # Determine which compressed block contains each query token.
+    # Shape: (n,)
+    query_blocks = torch.arange(n) // m
+
+    # Indices of the compressed KV blocks.
+    # Shape: (nb,)
+    block_indices = torch.arange(nb)
+
+    # A query token may attend only to blocks strictly earlier
+    # than the block containing that token.
+    # Broadcasting produces a boolean mask of shape (n, nb).
+    mask = block_indices.unsqueeze(0) < query_blocks.unsqueeze(1)
+
+    return mask
+
