@@ -33,6 +33,7 @@ python scaffold.py
 - [x] **21.** store_kv_entry
 - [x] **22.** LayerCache
 - [x] **23.** cached_attention
+- [x] **24.** decode_step
 
 ---
 

@@ -1184,3 +1184,63 @@ def cached_attention(cache, h, pos):
     # Remove the single-token sequence dimension.
     return out[:, 0, :]
 
+# Step 24 - decode_step
+def make_caches(stack, quantize=False):
+    # Create one heterogeneous KV cache for each decoder layer.
+    caches = [
+        LayerCache(block.attn, kind, quantize)
+        for block, kind in zip(stack.blocks, stack.kinds)
+    ]
+    return caches
+
+
+def decode_step(stack, caches, tokens, pos):
+    # tokens: (B,), token IDs at the current position.
+    # Embed the current token.
+    h = stack.embed(tokens)  # (B, d_model)
+
+    # Process each decoder block and its corresponding cache.
+    for block, cache in zip(stack.blocks, caches):
+        # Pre-normalize the hidden state before attention.
+        x = block.norm1(h)
+
+        # Append this token's normalized hidden state to the cache.
+        cache.append(x)
+
+        # Compute cached attention and apply the residual connection.
+        h = h + cached_attention(cache, x, pos)
+
+        # Apply the feed-forward network with its residual connection.
+        h = h + block.mlp(block.norm2(h))
+
+    # Final normalization and vocabulary projection.
+    logits = stack.lm_head(stack.norm(h))
+
+    # Shape: (B, vocab_size)
+    return logits
+
+
+def prefill(stack, tokens, quantize=False):
+    # tokens: (B, n), the input token sequence.
+    B, n = tokens.shape
+
+    # Start with fresh caches for all decoder layers.
+    caches = make_caches(stack, quantize=quantize)
+
+    # Decode each token sequentially, preserving the causal cache state.
+    outputs = []
+    for pos in range(n):
+        current_tokens = tokens[:, pos]
+        logits = decode_step(stack, caches, current_tokens, pos)
+        outputs.append(logits)
+
+    # Stack per-token logits into (B, n, vocab_size).
+    if outputs:
+        logits = torch.stack(outputs, dim=1)
+    else:
+        logits = stack.lm_head.weight.new_empty(
+            (B, 0, stack.lm_head.out_features)
+        )
+
+    return logits, caches
+
