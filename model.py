@@ -885,3 +885,44 @@ class HybridBlock(nn.Module):
 
         return H
 
+# Step 20 - HybridStack
+class HybridStack(nn.Module):
+    def __init__(self, vocab_size, d_model, n_layers, hca_every, csa_kwargs, hca_kwargs):
+        super().__init__()
+
+        # Embed token IDs into model-dimensional hidden states.
+        self.embed = nn.Embedding(vocab_size, d_model)
+
+        # Assign CSA or HCA to each decoder layer.
+        self.kinds = layer_kinds(n_layers, hca_every)
+
+        # Construct the interleaved hybrid decoder stack.
+        self.blocks = nn.ModuleList()
+
+        for kind in self.kinds:
+            if kind == "csa":
+                attn = CSALayer(d_model, **csa_kwargs)
+            else:
+                attn = HCALayer(d_model, **hca_kwargs)
+
+            self.blocks.append(HybridBlock(d_model, attn))
+
+        # Final normalization and vocabulary projection.
+        self.norm = HeadRMSNorm(d_model)
+        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+
+    def forward(self, tokens):
+        # tokens: (B, n)
+        H = self.embed(tokens)  # (B, n, d_model)
+
+        # Apply decoder blocks in sequence.
+        for block in self.blocks:
+            H = block(H)
+
+        # Produce vocabulary logits.
+        H = self.norm(H)
+        logits = self.lm_head(H)
+
+        # Output: (B, n, vocab_size)
+        return logits
+
