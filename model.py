@@ -275,3 +275,42 @@ def select_topk(scores, visible, k):
 
     return idx, valid
 
+# Step 10 - core_attention
+def core_attention(q, cands, valid, sink):
+    # q:     (B, n, n_heads, c)
+    # cands: (B, n, L, c)
+    # valid: (B, n, L)
+    # sink:  (n_heads,)
+
+    # Compute scaled dot-product attention logits.
+    # Shape: (B, n, n_heads, L)
+    logits = torch.einsum("bthc,btlc->bthl", q, cands)
+    logits = logits / (q.shape[-1] ** 0.5)
+
+    # Mask invalid candidates so that their attention probabilities are zero.
+    logits = logits.masked_fill(
+        ~valid.unsqueeze(2),
+        float("-inf")
+    )
+
+    # Append one learnable attention-sink logit per head.
+    # Shape: (B, n, n_heads, 1)
+    sink_logits = sink.reshape(1, 1, -1, 1).expand(
+        q.shape[0], q.shape[1], -1, -1
+    )
+
+    # Include the sink in softmax normalization.
+    # The sink absorbs probability mass without contributing a value vector.
+    all_logits = torch.cat((logits, sink_logits), dim=-1)
+    all_probs = torch.softmax(all_logits, dim=-1)
+
+    # Discard the sink probability; retain candidate probabilities.
+    # Shape: (B, n, n_heads, L)
+    probs = all_probs[..., :-1]
+
+    # Compute the weighted sum of candidate values.
+    # Shape: (B, n, n_heads, c)
+    out = torch.einsum("bthl,btlc->bthc", probs, cands)
+
+    return out, probs
+
