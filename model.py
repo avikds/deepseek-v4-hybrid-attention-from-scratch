@@ -462,3 +462,48 @@ class GroupedOutputProjection(nn.Module):
         # Shape: (B, n, d_model)
         return self.final(concatenated)
 
+# Step 14 - rope_core_attention
+def rope_core_attention(q, q_pos, cands, valid, cand_pos, sink, rope_dim):
+    # q:        (B, n, n_heads, c)
+    # q_pos:    (n,)
+    # cands:    (B, n, L, c)
+    # valid:    (B, n, L)
+    # cand_pos: broadcastable to (B, n, L)
+    # sink:     (n_heads,)
+
+    B, n, n_heads, c = q.shape
+
+    # Reshape query positions so they broadcast across the batch
+    # and attention heads.
+    q_positions = torch.as_tensor(q_pos, device=q.device)
+    q_positions = q_positions.reshape(1, n, 1)
+
+    # Apply partial RoPE to the queries using their absolute positions.
+    q_rotated = apply_partial_rope(
+        q, q_positions, rope_dim
+    )
+
+    # Apply partial RoPE to candidate KV entries using their positions.
+    # cand_pos may be (B, n, L) or another broadcastable shape.
+    cands_rotated = apply_partial_rope(
+        cands, cand_pos, rope_dim
+    )
+
+    # Run shared KV multi-query attention with attention sinks.
+    # The sink contributes to normalization but not to the output values.
+    out, _ = core_attention(
+        q_rotated,
+        cands_rotated,
+        valid,
+        sink
+    )
+
+    # Undo the query's absolute-position rotation to obtain the
+    # position-relative output representation.
+    out = apply_partial_rope(
+        out, -q_positions, rope_dim
+    )
+
+    # Shape: (B, n, n_heads, c)
+    return out
+
