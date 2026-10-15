@@ -16,6 +16,7 @@ python scaffold.py
 - [x] **4.** TokenCompressor
 - [x] **5.** HeadRMSNorm
 - [x] **6.** LatentQueries
+- [x] **7.** index_scores
 
 ---
 

@@ -197,3 +197,22 @@ class LatentQueries(nn.Module):
 
         return q, q_idx
 
+# Step 7 - index_scores
+def index_scores(q_idx, w_idx, k_idx):
+    # q_idx: (B, n, n_idx_heads, idx_dim)
+    # w_idx: (B, n, n_idx_heads)
+    # k_idx: (B, nb, idx_dim)
+
+    # Compute dot products between every query head and every compressed key.
+    # Result shape: (B, n, n_idx_heads, nb)
+    scores = torch.einsum("bthd,bsd->bths", q_idx, k_idx)
+
+    # Apply ReLU to the dot products.
+    scores = torch.relu(scores)
+
+    # Weight each indexer head's scores and sum across heads.
+    # Result shape: (B, n, nb)
+    scores = (scores * w_idx.unsqueeze(-1)).sum(dim=2)
+
+    return scores
+
