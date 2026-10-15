@@ -12,6 +12,7 @@ python scaffold.py
 
 - [x] **1.** split_blocks
 - [x] **2.** overlap_windows
+- [x] **3.** compress_blocks
 
 ---
 

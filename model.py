@@ -58,3 +58,44 @@ def overlap_windows(xa, xb, m, pad_value):
 
     return windows
 
+# Step 3 - compress_blocks
+def compress_blocks(Ca, Cb, Za, Zb, Ba, Bb, m):
+    # Validate the block size.
+    if not isinstance(m, int) or isinstance(m, bool) or m <= 0:
+        raise ValueError("m must be a positive integer")
+
+    B, n, c = Ca.shape
+
+    # Repeat positional biases for each block, aligning them with
+    # the within-block token positions.
+    bias_repeats = (n + m - 1) // m
+    Ba_expanded = Ba.repeat(bias_repeats, 1)[:n]
+    Bb_expanded = Bb.repeat(bias_repeats, 1)[:n]
+
+    # Add learnable positional biases to the compression logits.
+    Za_biased = Za + Ba_expanded.unsqueeze(0)
+    Zb_biased = Zb + Bb_expanded.unsqueeze(0)
+
+    # Build overlapping windows of logits.
+    # Missing entries in the first b-window receive -inf so that
+    # their softmax weights are exactly zero.
+    logits = overlap_windows(
+        Za_biased, Zb_biased, m, pad_value=float("-inf")
+    )
+
+    # Build matching windows of KV entries.
+    # Missing entries are zero-padded.
+    values = overlap_windows(
+        Ca, Cb, m, pad_value=0.0
+    )
+
+    # Normalize across the 2m window positions independently
+    # for each channel.
+    weights = torch.softmax(logits, dim=2)
+
+    # Compute the weighted sum to produce one compressed KV entry
+    # per complete block.
+    compressed = (weights * values).sum(dim=2)
+
+    return compressed
+
