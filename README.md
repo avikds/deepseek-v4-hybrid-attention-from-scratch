@@ -28,6 +28,7 @@ python scaffold.py
 - [x] **16.** hca_compress
 - [x] **17.** HCALayer
 - [x] **18.** layer_kinds
+- [x] **19.** HybridBlock
 
 ---
 

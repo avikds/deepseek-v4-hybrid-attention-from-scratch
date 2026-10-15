@@ -857,3 +857,31 @@ def layer_kinds(n_layers, hca_every):
         for i in range(n_layers)
     ]
 
+# Step 19 - HybridBlock
+class HybridBlock(nn.Module):
+    def __init__(self, d_model, attn):
+        super().__init__()
+
+        # Store the supplied CSA or HCA attention layer.
+        self.attn = attn
+
+        # Pre-normalization layers for attention and the feed-forward network.
+        self.norm1 = HeadRMSNorm(d_model)
+        self.norm2 = HeadRMSNorm(d_model)
+
+        # Two-layer feed-forward network with GELU activation.
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, 2 * d_model),
+            nn.GELU(),
+            nn.Linear(2 * d_model, d_model)
+        )
+
+    def forward(self, H):
+        # Pre-norm attention with a residual connection.
+        H = H + self.attn(self.norm1(H))
+
+        # Pre-norm feed-forward network with a residual connection.
+        H = H + self.mlp(self.norm2(H))
+
+        return H
+
