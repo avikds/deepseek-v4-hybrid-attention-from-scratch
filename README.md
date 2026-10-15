@@ -18,6 +18,7 @@ python scaffold.py
 - [x] **6.** LatentQueries
 - [x] **7.** index_scores
 - [x] **8.** causal_block_mask
+- [x] **9.** select_topk
 
 ---
 

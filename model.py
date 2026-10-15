@@ -237,3 +237,41 @@ def causal_block_mask(n, nb, m):
 
     return mask
 
+# Step 9 - select_topk
+def select_topk(scores, visible, k):
+    # Validate k.
+    if not isinstance(k, int) or isinstance(k, bool) or k < 0:
+        raise ValueError("k must be a non-negative integer")
+
+    B, n, nb = scores.shape
+    k_eff = min(k, nb)
+
+    # Expand the visibility mask across the batch dimension.
+    # visible: (n, nb) -> (B, n, nb)
+    visible_batch = visible.unsqueeze(0).expand(B, -1, -1)
+
+    # Exclude invisible blocks by assigning their scores negative infinity.
+    masked_scores = scores.masked_fill(
+        ~visible_batch, float("-inf")
+    )
+
+    # Stable descending sort preserves the original block-index order
+    # for tied scores, so lower block indices win ties.
+    sorted_scores, sorted_idx = torch.sort(
+        masked_scores,
+        dim=-1,
+        descending=True,
+        stable=True
+    )
+
+    # Keep at most k_eff block indices per query.
+    idx = sorted_idx[..., :k_eff]
+
+    # A selected entry is valid exactly when its block was visible.
+    valid = torch.gather(visible_batch, dim=-1, index=idx)
+
+    # Replace invalid indices with zero as required.
+    idx = torch.where(valid, idx, torch.zeros_like(idx))
+
+    return idx, valid
+
