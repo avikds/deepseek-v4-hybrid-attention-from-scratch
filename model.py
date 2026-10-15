@@ -356,3 +356,62 @@ def window_entries(x, n_win):
 
     return win, valid, positions
 
+# Step 12 - apply_partial_rope
+def apply_partial_rope(x, positions, rope_dim, base=10000.0):
+    # Validate the rotary dimension.
+    D = x.shape[-1]
+    if not isinstance(rope_dim, int) or isinstance(rope_dim, bool):
+        raise ValueError("rope_dim must be an integer")
+    if rope_dim < 0 or rope_dim > D or rope_dim % 2 != 0:
+        raise ValueError("rope_dim must be even and between 0 and the last dimension")
+    if base <= 0:
+        raise ValueError("base must be positive")
+
+    # Nothing to rotate if rope_dim is zero.
+    if rope_dim == 0:
+        return x
+
+    half = rope_dim // 2
+
+    # Preserve the dimensions outside the rotary portion.
+    unchanged = x[..., :D - rope_dim]
+    rotary = x[..., D - rope_dim:]
+
+    # Use float32 for angle computation when inputs use reduced precision.
+    calc_dtype = (
+        torch.float32
+        if x.dtype in (torch.float16, torch.bfloat16)
+        else x.dtype
+    )
+
+    # Ensure positions are on the same device and broadcastable
+    # to the leading dimensions of x.
+    positions = torch.as_tensor(positions, device=x.device)
+    positions = torch.broadcast_to(positions, x.shape[:-1])
+    positions = positions.to(dtype=calc_dtype)
+
+    # Compute inverse frequencies: base^(-2i / rope_dim).
+    i = torch.arange(half, device=x.device, dtype=calc_dtype)
+    inv_freq = base ** (-2.0 * i / rope_dim)
+
+    # Each position receives one rotation angle per dimension pair.
+    angles = positions.unsqueeze(-1) * inv_freq
+    cos_angles = torch.cos(angles)
+    sin_angles = torch.sin(angles)
+
+    # Pair dimensions using the half-split convention:
+    # (0, half), (1, half+1), ..., (half-1, rope_dim-1).
+    rotary_calc = rotary.to(dtype=calc_dtype)
+    a = rotary_calc[..., :half]
+    b = rotary_calc[..., half:]
+
+    # Rotate each pair: (a, b) -> (a*cos - b*sin, a*sin + b*cos).
+    rotated_a = a * cos_angles - b * sin_angles
+    rotated_b = a * sin_angles + b * cos_angles
+
+    # Restore the original input dtype and concatenate the untouched
+    # dimensions with the rotated dimensions.
+    rotated = torch.cat((rotated_a, rotated_b), dim=-1).to(dtype=x.dtype)
+
+    return torch.cat((unchanged, rotated), dim=-1)
+
