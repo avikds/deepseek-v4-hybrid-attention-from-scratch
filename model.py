@@ -140,3 +140,24 @@ class TokenCompressor(nn.Module):
         # do not produce a compressed entry.
         return compressed
 
+# Step 5 - HeadRMSNorm
+class HeadRMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+
+        # Store the numerical stability constant.
+        self.eps = eps
+
+        # Learnable per-dimension gain, initialized to ones.
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        # Compute the mean squared value along the last dimension.
+        mean_square = x.pow(2).mean(dim=-1, keepdim=True)
+
+        # Normalize using the reciprocal square root of the RMS variance.
+        x_norm = x * torch.rsqrt(mean_square + self.eps)
+
+        # Apply the learnable gain, preserving the input shape.
+        return x_norm * self.weight
+

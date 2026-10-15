@@ -14,6 +14,7 @@ python scaffold.py
 - [x] **2.** overlap_windows
 - [x] **3.** compress_blocks
 - [x] **4.** TokenCompressor
+- [x] **5.** HeadRMSNorm
 
 ---
 
